@@ -52972,6 +52972,47 @@ var BEHAVIOURAL_DENY = [
   "**/.aider*"
 ];
 
+// src/classifiers/dependabot-safe/infer.ts
+var TAG = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$/;
+var LEVELS = ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"];
+var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function tagPairs(message, name) {
+  const n = escapeRegExp(name);
+  const re = new RegExp(`(?:^|\\s)(?:Bumps ${n}|Updates \`${n}\`) from (\\S+) to (\\S+)`, "gm");
+  const pairs = /* @__PURE__ */ new Map();
+  for (const m of message.matchAll(re)) {
+    const from = (m[1] ?? "").replace(/\.$/, "");
+    const to = (m[2] ?? "").replace(/\.$/, "");
+    pairs.set(`${from}
+${to}`, [from, to]);
+  }
+  return [...pairs.values()];
+}
+function parseTag(tag) {
+  const m = TAG.exec(tag);
+  if (!m) return null;
+  const nums = [m[1], m[2], m[3]].filter((x) => x !== void 0).map(Number);
+  return { nums, suffix: m[4] ?? "" };
+}
+function inferDockerUpdateType(message, name) {
+  try {
+    const pairs = tagPairs(message, name);
+    if (pairs.length !== 1) return void 0;
+    const [from, to] = pairs[0];
+    if (from.includes("@") || to.includes("@")) return void 0;
+    const a = parseTag(from);
+    const b = parseTag(to);
+    if (!a || !b || a.nums.length !== b.nums.length || a.suffix !== b.suffix) return void 0;
+    for (let i = 0; i < a.nums.length; i++) {
+      if (b.nums[i] > a.nums[i]) return LEVELS[i];
+      if (b.nums[i] < a.nums[i]) return void 0;
+    }
+    return void 0;
+  } catch {
+    return void 0;
+  }
+}
+
 // src/classifiers/dependabot-safe/metadata.ts
 var import_yaml = __toESM(require_dist(), 1);
 var entrySchema = external_exports.looseObject({
@@ -53034,7 +53075,8 @@ var dependabotSafeConfigSchema = external_exports.strictObject({
   allowedUpdateTypes: external_exports.array(external_exports.enum(UPDATE_TYPES)).min(1),
   allowPreOneZero: external_exports.boolean().default(false),
   denyPackages: external_exports.array(external_exports.string().min(1)).default([]),
-  allowedFiles: external_exports.array(external_exports.string().min(1)).min(1)
+  allowedFiles: external_exports.array(external_exports.string().min(1)).min(1),
+  inferDockerUpdateType: external_exports.boolean().default(false)
 });
 var CATEGORY = "dependabot-safe";
 var MAX_LISTED = 10;
@@ -53043,8 +53085,16 @@ var inList = (login, list) => login !== null && list.some((l) => sameActor(login
 function pathsOf(f) {
   return f.previousPath && f.previousPath !== f.path ? [f.previousPath, f.path] : [f.path];
 }
+function withInferredTypes(deps, message) {
+  return deps.map((d) => {
+    if (d.updateType !== void 0) return d;
+    const updateType = inferDockerUpdateType(message, d.name);
+    return updateType === void 0 ? d : { ...d, updateType, inferred: true };
+  });
+}
 function describe3(d) {
-  const kind = [d.updateType?.replace(/^version-update:/, ""), d.type].filter(Boolean).join(", ");
+  const type = d.updateType?.replace(/^version-update:/, "");
+  const kind = [type && d.inferred ? `${type} inferred` : type, d.type].filter(Boolean).join(", ");
   return `${d.name} \u2192 ${d.version ?? "?"}${kind ? ` (${kind})` : ""}`;
 }
 var dependabotSafe = {
@@ -53059,6 +53109,7 @@ var dependabotSafe = {
     if (!inList(ctx.author, bots)) reasons.push(`PR author ${ctx.author || "(unknown)"} is not a Dependabot login`);
     if (!ctx.headRef.startsWith(cfg.branchPrefix)) reasons.push(`branch ${ctx.headRef} does not start with ${cfg.branchPrefix}`);
     const deps = [];
+    const inferTypes = cfg.inferDockerUpdateType && ctx.headRef.startsWith(`${cfg.branchPrefix}docker/`);
     if (ctx.commits.length === 0) reasons.push("no commits");
     for (const c of ctx.commits) {
       if (c.authorLogin === null) reasons.push(`commit ${short(c.sha)}: author has no GitHub login`);
@@ -53067,7 +53118,7 @@ var dependabotSafe = {
       else if (!inList(c.committerLogin, committers)) reasons.push(`commit ${short(c.sha)}: committed by ${c.committerLogin}`);
       const meta3 = parseDependabotMetadata(c.message);
       if (!meta3.ok) reasons.push(`commit ${short(c.sha)}: ${meta3.error}`);
-      else deps.push(...meta3.dependencies);
+      else deps.push(...inferTypes ? withInferredTypes(meta3.dependencies, c.message) : meta3.dependencies);
     }
     if (ctx.commits.length > 0 && deps.length === 0 && !reasons.some((r) => r.includes("updated-dependencies") || r.includes("metadata"))) {
       reasons.push("metadata lists no dependencies");

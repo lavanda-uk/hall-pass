@@ -235,6 +235,10 @@ Workflows triggered by Dependabot PRs can't read normal Actions secrets, only **
 
 When Dependabot rebases its PR, the force-push dismisses the old approval, because the ruleset dismisses stale approvals, and hall-pass re-approves the new head. This needs no extra configuration.
 
+### 4. Docker base-image updates (optional)
+
+Dependabot writes no `update-type` for Docker tag updates, so they abstain with `no update-type` by default. Set `inferDockerUpdateType: true` in the `dependabot-safe` config (and add your Dockerfiles to `allowedFiles`) to infer the type from the old and new tags in Dependabot's commit message, for example `python 3.12-slim → 3.15-slim` is a minor update. It is opt-in, applies only to `<branchPrefix>docker/` branches, and fails closed: tags it can't compare with certainty still abstain. See the [classifier page](src/classifiers/dependabot-safe/README.md#docker-updates-inferdockerupdatetype).
+
 ## Backtest
 
 The backtest replays the classifiers over a repo's merged PRs without writing anything to GitHub. Classifiers in `shadow` mode are judged as if they were `active`.
