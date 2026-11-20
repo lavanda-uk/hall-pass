@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Runtime dependencies are bundled into dist/, which CI requires to match the
+  # source. Dependabot can't rebuild it, so these PRs fail CI until someone runs
+  # `npm run build` on the branch and commits dist/. Grouped so that's one PR.
+  # Dev dependencies don't reach dist/ and should pass CI as-is.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Let a release age a few days before it can merge. Security updates
+    # ignore cooldown.
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      runtime:
+        dependency-type: production
+        update-types: [minor, patch]
+      dev:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  # Always go to a human: hall-pass denies .github/** whatever the config.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
