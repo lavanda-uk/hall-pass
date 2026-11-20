@@ -33,7 +33,7 @@ const patch = (name: string, version = "4.17.21"): Dep => ({
   updateType: "version-update:semver-patch",
 });
 
-function message(deps: Dep[]): string {
+function message(deps: Dep[], body = ""): string {
   const entries = deps
     .map((d) =>
       [
@@ -47,11 +47,11 @@ function message(deps: Dep[]): string {
         .join("\n"),
     )
     .join("\n");
-  return `Bump ${deps.map((d) => d.name).join(", ")}\n\n---\nupdated-dependencies:\n${entries}\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>`;
+  return `Bump ${deps.map((d) => d.name).join(", ")}\n\n${body}---\nupdated-dependencies:\n${entries}\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>`;
 }
 
-function commit(deps: Dep[], over: Partial<PrCommit> = {}): PrCommit {
-  return { sha: "abc1234def", authorLogin: "dependabot[bot]", committerLogin: "web-flow", message: message(deps), ...over };
+function commit(deps: Dep[], over: Partial<PrCommit> = {}, body = ""): PrCommit {
+  return { sha: "abc1234def", authorLogin: "dependabot[bot]", committerLogin: "web-flow", message: message(deps, body), ...over };
 }
 
 function dependabotPr(over: Partial<PrContext> = {}): PrContext {
@@ -267,6 +267,71 @@ describe("dependabot-safe: abstain", () => {
 });
 
 // ---------------------------------------------------------------------------
+// inferDockerUpdateType
+// ---------------------------------------------------------------------------
+
+describe("dependabot-safe: inferDockerUpdateType", () => {
+  // lavanda-uk/clotho PR #213: Dependabot gives a Docker tag update no update-type.
+  const python = { name: "python", version: "3.15-slim", type: "direct:production" };
+  const dockerPr = (over: Partial<PrContext> = {}) =>
+    dependabotPr({
+      headRef: "dependabot/docker/ui/python-3.15-slim",
+      commits: [commit([python], {}, "Bumps python from 3.12-slim to 3.15-slim.\n\n")],
+      files: [modified("ui/Dockerfile")],
+      ...over,
+    });
+  const dockerCfg = (infer: boolean, types: string[] = ["version-update:semver-patch", "version-update:semver-minor"]) =>
+    dependabotSafeConfigSchema.parse({
+      botLogins: ["dependabot[bot]"],
+      allowedCommitters: ["web-flow"],
+      branchPrefix: "dependabot/",
+      allowedUpdateTypes: types,
+      allowedFiles: ["**/Dockerfile"],
+      ...(infer ? { inferDockerUpdateType: true } : {}),
+    });
+  const verdict = (ctx: PrContext, c: ReturnType<typeof dockerCfg>) => dependabotSafe.run(ctx, c);
+
+  it("on: the clotho #213 python 3.12-slim → 3.15-slim update is eligible, marked inferred", async () => {
+    expect(await verdict(dockerPr(), dockerCfg(true))).toEqual({
+      result: "eligible",
+      category: "dependabot-safe",
+      evidence: ["python → 3.15-slim (semver-minor inferred, direct:production)"],
+    });
+  });
+
+  it("off (the default): the same PR abstains with no update-type", async () => {
+    const v = await verdict(dockerPr(), dockerCfg(false));
+    expect(v.result).toBe("abstain");
+    expect(v.result === "abstain" && v.note).toContain("python: no update-type");
+  });
+
+  it("on, but not a docker/ branch: abstains with no update-type", async () => {
+    const v = await verdict(dockerPr({ headRef: "dependabot/npm_and_yarn/ui/python-3.15-slim" }), dockerCfg(true));
+    expect(v.result).toBe("abstain");
+    expect(v.result === "abstain" && v.note).toContain("python: no update-type");
+  });
+
+  it("on, but the tags can't be compared: abstains with no update-type", async () => {
+    const ctx = dockerPr({ commits: [commit([python], {}, "Bumps python from bookworm to trixie.\n\n")] });
+    const v = await verdict(ctx, dockerCfg(true));
+    expect(v.result === "abstain" && v.note).toContain("python: no update-type");
+  });
+
+  it("on: an inferred major not in allowedUpdateTypes abstains", async () => {
+    const ctx = dockerPr({ commits: [commit([{ ...python, version: "4.0-slim" }], {}, "Bumps python from 3.12-slim to 4.0-slim.\n\n")] });
+    const v = await verdict(ctx, dockerCfg(true));
+    expect(v.result).toBe("abstain");
+    expect(v.result === "abstain" && v.note).toContain("python: version-update:semver-major is not allowed");
+  });
+
+  it("on: a Dependabot-supplied update-type wins over the inferred one", async () => {
+    const supplied = { ...python, updateType: "version-update:semver-major" };
+    const v = await verdict(dockerPr({ commits: [commit([supplied], {}, "Bumps python from 3.12-slim to 3.15-slim.\n\n")] }), dockerCfg(true));
+    expect(v.result === "abstain" && v.note).toContain("python: version-update:semver-major is not allowed");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Config, through parseConfig
 // ---------------------------------------------------------------------------
 
@@ -282,7 +347,13 @@ describe("dependabot-safe config", () => {
     const r = parseConfig(block(valid), registry);
     expect(r.kind).toBe("ok");
     const c = r.kind === "ok" ? r.config.classifiers.find((x) => x.classifier.id === "dependabot-safe") : undefined;
-    expect(c?.cfg).toMatchObject({ allowedCommitters: [], allowPreOneZero: false, denyPackages: [] });
+    expect(c?.cfg).toMatchObject({ allowedCommitters: [], allowPreOneZero: false, denyPackages: [], inferDockerUpdateType: false });
+  });
+
+  it("inferDockerUpdateType: true parses", () => {
+    const r = parseConfig(block(valid + "    inferDockerUpdateType: true\n"), registry);
+    const c = r.kind === "ok" ? r.config.classifiers.find((x) => x.classifier.id === "dependabot-safe") : undefined;
+    expect(c?.cfg).toMatchObject({ inferDockerUpdateType: true });
   });
 
   it.each([
@@ -291,6 +362,7 @@ describe("dependabot-safe config", () => {
     ["an invalid update type", valid.replace("version-update:semver-patch", "version-update:any")],
     ["an unknown key", valid + "    surprise: true\n"],
     ["empty allowedFiles", valid.replace(`["**/package.json"]`, "[]")],
+    ["a non-boolean inferDockerUpdateType", valid + "    inferDockerUpdateType: yes please\n"],
   ])("%s is a config error", (_, body) => {
     expect(parseConfig(block(body), registry).kind).toBe("error");
   });

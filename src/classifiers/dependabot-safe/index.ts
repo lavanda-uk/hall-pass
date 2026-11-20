@@ -2,6 +2,7 @@ import picomatch from "picomatch";
 import { z } from "zod";
 import { BEHAVIOURAL_DENY, sameActor } from "../../shared.js";
 import type { Classifier, PrFile, Verdict } from "../../types.js";
+import { inferDockerUpdateType } from "./infer.js";
 import { parseDependabotMetadata, type DependabotDependency } from "./metadata.js";
 
 export { parseDependabotMetadata } from "./metadata.js";
@@ -20,6 +21,7 @@ export const dependabotSafeConfigSchema = z.strictObject({
   allowPreOneZero: z.boolean().default(false),
   denyPackages: z.array(z.string().min(1)).default([]),
   allowedFiles: z.array(z.string().min(1)).min(1),
+  inferDockerUpdateType: z.boolean().default(false),
 });
 
 export type DependabotSafeConfig = z.infer<typeof dependabotSafeConfigSchema>;
@@ -35,8 +37,25 @@ function pathsOf(f: PrFile): string[] {
   return f.previousPath && f.previousPath !== f.path ? [f.previousPath, f.path] : [f.path];
 }
 
-function describe(d: DependabotDependency): string {
-  const kind = [d.updateType?.replace(/^version-update:/, ""), d.type].filter(Boolean).join(", ");
+/** A dependency, marked when hall-pass inferred its update-type rather than Dependabot supplying it. */
+type Dependency = DependabotDependency & { inferred?: boolean };
+
+/**
+ * Fill in a missing update-type from the commit message's old and new tags.
+ * Docker updates only: Dependabot supplies no update-type for Docker tags.
+ * A supplied update-type always wins.
+ */
+function withInferredTypes(deps: DependabotDependency[], message: string): Dependency[] {
+  return deps.map((d) => {
+    if (d.updateType !== undefined) return d;
+    const updateType = inferDockerUpdateType(message, d.name);
+    return updateType === undefined ? d : { ...d, updateType, inferred: true };
+  });
+}
+
+function describe(d: Dependency): string {
+  const type = d.updateType?.replace(/^version-update:/, "");
+  const kind = [type && d.inferred ? `${type} inferred` : type, d.type].filter(Boolean).join(", ");
   return `${d.name} → ${d.version ?? "?"}${kind ? ` (${kind})` : ""}`;
 }
 
@@ -57,7 +76,8 @@ export const dependabotSafe: Classifier<DependabotSafeConfig> = {
     if (!ctx.headRef.startsWith(cfg.branchPrefix)) reasons.push(`branch ${ctx.headRef} does not start with ${cfg.branchPrefix}`);
 
     // 3–5. Every commit is Dependabot's, and carries its metadata.
-    const deps: DependabotDependency[] = [];
+    const deps: Dependency[] = [];
+    const inferTypes = cfg.inferDockerUpdateType && ctx.headRef.startsWith(`${cfg.branchPrefix}docker/`);
     if (ctx.commits.length === 0) reasons.push("no commits");
     for (const c of ctx.commits) {
       if (c.authorLogin === null) reasons.push(`commit ${short(c.sha)}: author has no GitHub login`);
@@ -67,7 +87,7 @@ export const dependabotSafe: Classifier<DependabotSafeConfig> = {
 
       const meta = parseDependabotMetadata(c.message);
       if (!meta.ok) reasons.push(`commit ${short(c.sha)}: ${meta.error}`);
-      else deps.push(...meta.dependencies);
+      else deps.push(...(inferTypes ? withInferredTypes(meta.dependencies, c.message) : meta.dependencies));
     }
     if (ctx.commits.length > 0 && deps.length === 0 && !reasons.some((r) => r.includes("updated-dependencies") || r.includes("metadata"))) {
       reasons.push("metadata lists no dependencies");
