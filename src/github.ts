@@ -46,7 +46,24 @@ export class GitHubOps {
   constructor(
     private readonly octokit: Octokit,
     private readonly repo: Repo,
+    /**
+     * Set only when the review must come from a user rather than the App. Reviews
+     * then read and write through this client and this login, while check runs,
+     * labels, the comment and auto-merge stay with the App — so each identity
+     * only ever looks for work it did itself.
+     */
+    private readonly review?: { octokit: Octokit; login: string },
   ) {}
+
+  /** The client reviews are read and written with: the review identity if there is one, else the App. */
+  private get reviewOctokit(): Octokit {
+    return this.review?.octokit ?? this.octokit;
+  }
+
+  /** Who an approval must belong to for hall-pass to call it its own, and to dismiss it. */
+  private get reviewLogin(): string | null {
+    return this.review ? this.review.login : this.self;
+  }
 
   private get r() {
     return { owner: this.repo.owner, repo: this.repo.name };
@@ -156,20 +173,21 @@ export class GitHubOps {
   // ---- reviews ---------------------------------------------------------
 
   private async myApprovals(number: number) {
-    if (!this.self) throw new Error("App identity unknown; refusing to touch reviews");
-    const reviews = await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
+    const login = this.reviewLogin;
+    if (!login) throw new Error("Reviewer identity unknown; refusing to touch reviews");
+    const reviews = await this.reviewOctokit.paginate(this.reviewOctokit.rest.pulls.listReviews, {
       ...this.r,
       pull_number: number,
       per_page: 100,
     });
-    return reviews.filter((r) => r.state === "APPROVED" && sameActor(r.user?.login, this.self));
+    return reviews.filter((r) => r.state === "APPROVED" && sameActor(r.user?.login, login));
   }
 
   /** Approve, unless we already have an approval on this exact head SHA. Returns true if it approved. */
   async approve(number: number, headSha: string, body: string): Promise<boolean> {
     const mine = await this.myApprovals(number);
     if (mine.some((r) => r.commit_id === headSha)) return false;
-    await this.octokit.rest.pulls.createReview({
+    await this.reviewOctokit.rest.pulls.createReview({
       ...this.r,
       pull_number: number,
       commit_id: headSha,
@@ -179,11 +197,11 @@ export class GitHubOps {
     return true;
   }
 
-  /** Dismiss every active approval hall-pass's App holds on this PR. Returns how many it dismissed. */
+  /** Dismiss every active approval hall-pass holds on this PR. Returns how many it dismissed. */
   async dismissApprovals(number: number, message: string): Promise<number> {
     const mine = await this.myApprovals(number);
     for (const r of mine) {
-      await this.octokit.rest.pulls.dismissReview({ ...this.r, pull_number: number, review_id: r.id, message });
+      await this.reviewOctokit.rest.pulls.dismissReview({ ...this.r, pull_number: number, review_id: r.id, message });
     }
     return mine.length;
   }

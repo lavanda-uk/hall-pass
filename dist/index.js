@@ -55638,14 +55638,24 @@ function truncate(s) {
   return s.length <= MAX_CHECK_TEXT ? s : s.slice(0, MAX_CHECK_TEXT) + "\n\n\u2026truncated";
 }
 var GitHubOps = class {
-  constructor(octokit, repo) {
+  constructor(octokit, repo, review) {
     this.octokit = octokit;
     this.repo = repo;
+    this.review = review;
   }
   octokit;
   repo;
+  review;
   /** The App's own login ("slug[bot]"), learned from the first check run we create. */
   self = null;
+  /** The client reviews are read and written with: the review identity if there is one, else the App. */
+  get reviewOctokit() {
+    return this.review?.octokit ?? this.octokit;
+  }
+  /** Who an approval must belong to for hall-pass to call it its own, and to dismiss it. */
+  get reviewLogin() {
+    return this.review ? this.review.login : this.self;
+  }
   get r() {
     return { owner: this.repo.owner, repo: this.repo.name };
   }
@@ -55740,19 +55750,20 @@ ${body}`;
   }
   // ---- reviews ---------------------------------------------------------
   async myApprovals(number4) {
-    if (!this.self) throw new Error("App identity unknown; refusing to touch reviews");
-    const reviews = await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
+    const login = this.reviewLogin;
+    if (!login) throw new Error("Reviewer identity unknown; refusing to touch reviews");
+    const reviews = await this.reviewOctokit.paginate(this.reviewOctokit.rest.pulls.listReviews, {
       ...this.r,
       pull_number: number4,
       per_page: 100
     });
-    return reviews.filter((r) => r.state === "APPROVED" && sameActor(r.user?.login, this.self));
+    return reviews.filter((r) => r.state === "APPROVED" && sameActor(r.user?.login, login));
   }
   /** Approve, unless we already have an approval on this exact head SHA. Returns true if it approved. */
   async approve(number4, headSha, body) {
     const mine = await this.myApprovals(number4);
     if (mine.some((r) => r.commit_id === headSha)) return false;
-    await this.octokit.rest.pulls.createReview({
+    await this.reviewOctokit.rest.pulls.createReview({
       ...this.r,
       pull_number: number4,
       commit_id: headSha,
@@ -55761,11 +55772,11 @@ ${body}`;
     });
     return true;
   }
-  /** Dismiss every active approval hall-pass's App holds on this PR. Returns how many it dismissed. */
+  /** Dismiss every active approval hall-pass holds on this PR. Returns how many it dismissed. */
   async dismissApprovals(number4, message) {
     const mine = await this.myApprovals(number4);
     for (const r of mine) {
-      await this.octokit.rest.pulls.dismissReview({ ...this.r, pull_number: number4, review_id: r.id, message });
+      await this.reviewOctokit.rest.pulls.dismissReview({ ...this.r, pull_number: number4, review_id: r.id, message });
     }
     return mine.length;
   }
@@ -56081,8 +56092,14 @@ ${report(decision, dryRun, { timings: true })}` : ""].filter(Boolean).join("\n\n
 
 // src/main.ts
 var EVENTS = /* @__PURE__ */ new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
+async function reviewIdentity(token) {
+  const octokit = getOctokit(token);
+  const { data: me } = await octokit.rest.users.getAuthenticated();
+  return { octokit, login: me.login };
+}
 async function main() {
   const token = getInput("github-token", { required: true });
+  const reviewToken = getInput("review-token");
   const configPath = getInput("config") || ".github/hall-pass.yml";
   const dryRun = getBooleanInput("dry-run");
   if (context2.eventName !== "pull_request" || !EVENTS.has(String(context2.payload.action))) {
@@ -56092,6 +56109,7 @@ async function main() {
     return;
   }
   const octokit = getOctokit(token);
+  const review = reviewToken ? await reviewIdentity(reviewToken) : void 0;
   const repo = { owner: context2.repo.owner, name: context2.repo.repo };
   const number4 = context2.payload.pull_request.number;
   const { data: pull } = await octokit.rest.pulls.get({ owner: repo.owner, repo: repo.name, pull_number: number4 });
@@ -56099,7 +56117,7 @@ async function main() {
     pull,
     repo,
     dryRun,
-    ops: new GitHubOps(octokit, repo),
+    ops: new GitHubOps(octokit, repo, review),
     loadConfig: (baseSha) => loadConfig(octokit, repo, baseSha, configPath, classifiers),
     buildContext: () => buildPrContext(octokit, repo, pull),
     log: core_exports
