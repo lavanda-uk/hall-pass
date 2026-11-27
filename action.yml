@@ -6,6 +6,16 @@ inputs:
   github-token:
     description: Installation token for the GitHub App hall-pass acts as (from actions/create-github-app-token).
     required: true
+  review-token:
+    description: >-
+      Token to post and dismiss the approving review with, when the review has to come from a user
+      rather than the App. CODEOWNERS recognises users and teams, so only a member of the owning team
+      satisfies a code-owner requirement — an App's review never does, however the App is installed.
+      Needs Pull requests read and write. The check run stays on github-token either way, because
+      creating one is open to Apps alone. Leave it unset for the single-identity behaviour, where the
+      App both reviews and checks. Do not pass github-token here: an App installation token cannot
+      identify itself as a user, so it fails rather than falling back.
+    required: false
   config:
     description: Path to the config file, read from the PR's base commit.
     required: false

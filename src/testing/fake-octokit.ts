@@ -5,7 +5,7 @@ import type { Octokit } from "../github.js";
 
 export const BOT = "merge-bot[bot]";
 
-interface Review {
+export interface Review {
   id: number;
   user: { login: string };
   state: "APPROVED" | "DISMISSED" | "COMMENTED";
@@ -29,6 +29,7 @@ export interface FakeState {
   mergedSha: string | null;
   getContentRefs: string[];
   checkRunNotYetVisible: number; // checks.update answers 404 this many times first
+  actor: string; // who this client's writes are attributed to
 }
 
 export function fakeOctokit(init: Partial<FakeState> = {}) {
@@ -48,6 +49,7 @@ export function fakeOctokit(init: Partial<FakeState> = {}) {
     mergedSha: null,
     getContentRefs: [],
     checkRunNotYetVisible: 0,
+    actor: BOT,
     ...init,
   };
   let nextId = 1000;
@@ -126,7 +128,7 @@ export function fakeOctokit(init: Partial<FakeState> = {}) {
       },
       async createReview(p: { commit_id: string; body: string }) {
         call("pulls.createReview");
-        s.reviews.push({ id: nextId++, user: { login: BOT }, state: "APPROVED", commit_id: p.commit_id, body: p.body });
+        s.reviews.push({ id: nextId++, user: { login: s.actor }, state: "APPROVED", commit_id: p.commit_id, body: p.body });
         return { data: {} };
       },
       async dismissReview(p: { review_id: number }) {
