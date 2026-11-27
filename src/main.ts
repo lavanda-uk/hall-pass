@@ -12,8 +12,21 @@ const EVENTS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]
 /** Who review-token belongs to. Asked of GitHub rather than configured, so it cannot drift. */
 async function reviewIdentity(token: string): Promise<{ octokit: Octokit; login: string }> {
   const octokit = getOctokit(token);
-  const { data: me } = await octokit.rest.users.getAuthenticated();
-  return { octokit, login: me.login };
+  try {
+    const { data: me } = await octokit.rest.users.getAuthenticated();
+    return { octokit, login: me.login };
+  } catch (e) {
+    // An installation token authenticates as the App, not as anyone, so GET /user
+    // refuses it. Passing github-token here is the likely mistake, and it is not a
+    // fallback: an App's review is what review-token exists to avoid.
+    if ((e as { status?: number }).status === 403) {
+      throw new Error(
+        "review-token could not identify itself as a user. A GitHub App installation token cannot be used here — leave review-token unset to let the App review.",
+        { cause: e },
+      );
+    }
+    throw e;
+  }
 }
 
 async function main(): Promise<void> {

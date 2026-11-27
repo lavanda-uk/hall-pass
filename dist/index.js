@@ -56094,8 +56094,18 @@ ${report(decision, dryRun, { timings: true })}` : ""].filter(Boolean).join("\n\n
 var EVENTS = /* @__PURE__ */ new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
 async function reviewIdentity(token) {
   const octokit = getOctokit(token);
-  const { data: me } = await octokit.rest.users.getAuthenticated();
-  return { octokit, login: me.login };
+  try {
+    const { data: me } = await octokit.rest.users.getAuthenticated();
+    return { octokit, login: me.login };
+  } catch (e) {
+    if (e.status === 403) {
+      throw new Error(
+        "review-token could not identify itself as a user. A GitHub App installation token cannot be used here \u2014 leave review-token unset to let the App review.",
+        { cause: e }
+      );
+    }
+    throw e;
+  }
 }
 async function main() {
   const token = getInput("github-token", { required: true });
